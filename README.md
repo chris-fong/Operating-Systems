@@ -4,10 +4,11 @@
 **Author:** Christopher Samuel Fong 方文豪 · Student ID 112006233
 
 A small **multithreading kernel written from scratch for the Intel 8051** microcontroller,
-built up over four programming-project checkpoints. It is compiled with **SDCC** and runs on
+built up over five programming-project checkpoints. It is compiled with **SDCC** and runs on
 the **EdSim51** 8051 simulator. The project starts from a cooperative scheduler and evolves
 into a timer-driven **preemptive** kernel with **counting semaphores**, a **bounded buffer**,
-and a **starvation-free** multi-producer/consumer solution.
+and a **starvation-free** multi-producer/consumer solution — then drives real peripherals
+(button bank, keypad, LCD) and ends with a fully threaded **dinosaur game**.
 
 Everything runs in the 8051's tiny 128 bytes of internal RAM, so all kernel state and shared
 data are hand-placed at fixed addresses to coexist with SDCC's register banks and scratch area.
@@ -24,6 +25,7 @@ Each folder is a self-contained, buildable checkpoint:
 | [`112006233_ppc2/`](112006233_ppc2) | **CP2** | Preemptive multithreading via a Timer 0 interrupt + `__critical` sections |
 | [`112006233_ppc3/`](112006233_ppc3) | **CP3** | Counting semaphores + 3-slot bounded buffer |
 | [`ppc4/`](ppc4) | **CP4** | Two producers / one consumer, starvation analysis + a fair scheduler |
+| [`ppc5/`](ppc5) | **CP5** | Real peripherals (button bank, keypad, LCD) + a threaded dinosaur game |
 
 Each folder contains the kernel (`cooperative.*` or `preemptive.*`), a test application, a
 `Makefile`, and the SDCC build artifacts (`.hex`, `.map`, `.rst`, `.lst`, …). The `.hex` file
@@ -138,6 +140,51 @@ This checkpoint studies **fairness**, toggled by a `FAIR` compile-time flag:
 
 ---
 
+## Checkpoint 5 — Peripherals & the Dinosaur Game
+`ppc5/` — [`testlcd.c`](ppc5/testlcd.c) · [`dino.c`](ppc5/dino.c) · driver libs `buttonlib.*`, `keylib.*`, `lcdlib.*`
+
+The final checkpoint takes the threading core into the physical world, driving three EdSim51
+peripherals through small device drivers:
+
+- **Button bank** (`buttonlib`) — 8 switches on port `P2`; a press pulls a bit low.
+- **Numeric keypad** (`keylib`) — a 4×3 matrix scanned row-by-row over port `P0` (requires the
+  simulator's *AND-Gate Enabled* option).
+- **LCD** (`lcdlib`) — a 2×16 HD44780 module in 4-bit mode, with custom CG-RAM glyphs.
+
+### Part 1 — Peripherals as producers/consumer (`testlcd.c`)
+The two-producer / one-consumer structure from CP4 is re-wired to real hardware: a **button-bank
+producer** and a **keypad producer** each edge-detect presses (one character enqueued per press,
+no auto-repeat until release) and push into a 3-slot ring buffer; an **LCD consumer** dequeues and
+displays each character once `LCD_ready()` is true. Scheduling here is deliberately **cooperative**
+(`ET0` cleared so Timer 0 never preempts, each thread `ThreadYield()`s once per pass) so that a
+switch only happens at a shallow point — keeping the 13-byte context frame safely inside the
+16-byte per-thread stack even though the LCD/keypad calls nest several levels deep. Ring access is
+**non-blocking**: a producer that finds the ring full simply skips the round, so `SemaphoreWait`
+on the lock never spins.
+
+### Part 2 — Dinosaur game (`dino.c`)
+A cactus-dodging game implemented as **three cooperative threads**:
+
+- **`main` (game logic)** — reads difficulty (`0–9` then `#`), moves the dino between the two rows
+  on keys `2`/`8`, slides cacti left each frame, scores dodges, and detects collisions.
+- **`pad_thread`** — edge-detects keypad presses into a one-slot mailbox.
+- **`draw_thread`** — owns the LCD and repaints from a snapshot of the world each frame.
+
+Two engineering details stand out:
+- **The map is stored as bits, not bytes.** Each 16-column row is a single `unsigned int` bitmask
+  (`row0`, `row1`); a cactus slide is just a `>>= 1`. This is essential given how little RAM the
+  8051 has.
+- **Zero C auto-locals in the game.** Because all threads share register bank 0, SDCC would place
+  C locals in low IRAM and risk overrunning game state, so **every variable is pinned to a fixed
+  `__data __at` address** and helper functions avoid locals entirely — a deliberate workaround for
+  SDCC's absolute-register (`ar`) behavior across register-bank switches.
+
+Difficulty scales the number of yields per frame; new cacti are generated with a tiny LFSR
+(`lrng`) and spaced so the wall is always passable. On a collision the game switches to a
+`Game Over` screen showing the score (formatted to decimal without a divide instruction).
+
+---
+
 ## Building & Running
 
 ### Prerequisites
@@ -152,6 +199,9 @@ cd ppc4
 make            # produces test3threads.hex
 # make clean    # removes build artifacts
 ```
+
+`ppc5` builds two images — `testlcd.hex` (Part 1) and `dino.hex` (the game) — and needs the
+`--model-small` flag plus the peripheral driver objects, all handled by its `Makefile`.
 
 > **Note:** `Makefile` recipes must be indented with **tabs**, not spaces.
 
@@ -181,5 +231,6 @@ make            # produces test3threads.hex
 ## Concepts Demonstrated
 Context switching · cooperative vs. preemptive scheduling · interrupt-driven timeslicing ·
 register-bank-per-thread stack management · counting semaphores · the bounded-buffer problem ·
-critical sections & atomicity · thread starvation vs. deadlock · fairness · bare-metal C on a
-128-byte 8051.
+critical sections & atomicity · thread starvation vs. deadlock · fairness · memory-mapped I/O
+and device drivers (button bank, matrix keypad, HD44780 LCD) · bit-packed game state ·
+bare-metal C on a 128-byte 8051.
